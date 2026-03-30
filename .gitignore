@@ -2,5 +2,4 @@ apps-sdk-ui/*
 openai-apps-sdk-examples/*
 node_modules
 dist
-api/_widget-html.ts
 .vercel

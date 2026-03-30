@@ -1,5 +1,10 @@
-import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { WIDGET_HTML } from "./_widget-html";
+import { readFileSync } from "fs";
+import { join } from "path";
+
+const WIDGET_HTML = readFileSync(
+  join(__dirname, "..", "dist", "index.html"),
+  "utf-8"
+);
 
 const WIDGET_URI = "ui://widget/todo.html";
 const MIME_TYPE = "text/html+skybridge";
@@ -170,7 +175,7 @@ function processRequest(req: JsonRpcRequest): JsonRpcResponse | null {
   }
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");

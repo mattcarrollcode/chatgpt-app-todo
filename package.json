@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node scripts/embed-widget.mjs",
+    "build": "vite build",
     "start": "node api/mcp.mjs"
   },
   "dependencies": {

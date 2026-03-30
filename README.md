@@ -32,9 +32,7 @@ Opens the widget UI at `http://localhost:5173`. The `window.openai` APIs aren't 
 npm run build
 ```
 
-This runs two steps:
-1. `vite build` — bundles the React widget into a single self-contained `dist/index.html` (all JS/CSS inlined)
-2. `node scripts/embed-widget.mjs` — embeds that HTML into `api/_widget-html.ts` so the serverless function can serve it
+This bundles the React widget into a single self-contained `dist/index.html` (all JS/CSS inlined). The serverless function reads this file at runtime to serve it as an MCP resource.
 
 ## Deploy to Vercel
 
@@ -112,8 +110,7 @@ Then add the ngrok URL (e.g. `https://abc123.ngrok-free.app/api/mcp`) as a conne
 
 ```
 ├── api/
-│   ├── mcp.ts              # Vercel serverless function — MCP server
-│   └── _widget-html.ts     # Auto-generated: widget HTML string (gitignored)
+│   └── mcp.ts              # Vercel serverless function — MCP server
 ├── src/
 │   ├── App.tsx              # Todo widget using @openai/apps-sdk-ui components
 │   ├── main.tsx             # Widget entry point
@@ -121,8 +118,6 @@ Then add the ngrok URL (e.g. `https://abc123.ngrok-free.app/api/mcp`) as a conne
 │   ├── types.ts             # window.openai type definitions
 │   ├── use-openai-global.ts # Hook for reading window.openai state
 │   └── use-widget-state.ts  # Hook for persistent widget state
-├── scripts/
-│   └── embed-widget.mjs     # Post-build: embeds dist/index.html into api/
 ├── index.html               # Vite dev HTML template
 ├── package.json
 ├── tsconfig.json
@@ -159,7 +154,7 @@ User ─── ChatGPT ─── MCP (JSON-RPC over HTTP) ─── Vercel Serve
 - Both `vercel.json` and the API handler set CORS headers. Redeploy if you've changed `vercel.json`.
 
 **Build fails**
-- The build requires `dist/index.html` to exist before `embed-widget.mjs` runs. If `vite build` fails, fix it first.
+- Ensure all dependencies are installed (`npm install`) and `vite build` produces `dist/index.html`.
 
 **State doesn't persist across conversation turns**
 - The `openai/widgetSessionId` in tool response `_meta` links state across turns. Verify the server returns it.

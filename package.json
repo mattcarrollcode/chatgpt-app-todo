@@ -1,0 +1,26 @@
+{
+  "name": "chatgpt-todo-app",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/embed-widget.mjs",
+    "start": "node api/mcp.mjs"
+  },
+  "dependencies": {
+    "@openai/apps-sdk-ui": "file:../apps-sdk-ui",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.10",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "tailwindcss": "^4.0.10",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0",
+    "vite-plugin-singlefile": "^2.0.3"
+  }
+}

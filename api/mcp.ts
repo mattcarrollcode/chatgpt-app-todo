@@ -1,6 +1,7 @@
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { loadTodos, saveTodos, deleteTodos, STORAGE_ENABLED } from "./db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -48,9 +49,15 @@ function widgetMeta(sessionId?: string) {
 const TOOL_INPUT_SCHEMA = {
   type: "object",
   properties: {
+    action: {
+      type: "string",
+      enum: ["add", "list", "set", "clear"],
+      description:
+        "Action to perform: 'add' merges new items into the list (default when items provided), 'list' returns the current list (default when no items), 'set' replaces the entire list, 'clear' removes all items.",
+    },
     items: {
       type: "array",
-      description: "List of todo items to add or display.",
+      description: "Todo items. Required for 'add' and 'set' actions.",
       items: {
         type: "object",
         properties: {
@@ -67,8 +74,9 @@ const TOOL_INPUT_SCHEMA = {
       },
     },
   },
-  required: ["items"],
 } as const;
+
+type TodoItem = { id: string; title: string; completed: boolean };
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -127,11 +135,40 @@ function oauthErrorResult() {
   };
 }
 
-function handleMethod(
+function uid(): string {
+  return (
+    Date.now().toString(36) + Math.random().toString(36).slice(2)
+  );
+}
+
+function mergeTodos(
+  existing: TodoItem[],
+  incoming: Array<{ title: string; completed?: boolean }>
+): TodoItem[] {
+  const byTitle = new Map(
+    existing.map((item) => [item.title.toLowerCase(), item])
+  );
+  for (const item of incoming) {
+    const key = item.title.toLowerCase();
+    if (byTitle.has(key)) {
+      const prev = byTitle.get(key)!;
+      byTitle.set(key, { ...prev, completed: item.completed ?? prev.completed });
+    } else {
+      byTitle.set(key, {
+        id: uid(),
+        title: item.title,
+        completed: item.completed ?? false,
+      });
+    }
+  }
+  return Array.from(byTitle.values());
+}
+
+async function handleMethod(
   method: string,
   params: Record<string, unknown> = {},
   userId: string | null = null
-): unknown | null {
+): Promise<unknown | null> {
   switch (method) {
     case "initialize":
       return {
@@ -150,7 +187,11 @@ function handleMethod(
             name: "manage-todos",
             title: "Manage todo list",
             description:
-              "Add, display, or update todo items in an interactive widget. Pass items to add them to the list.",
+              "Add, display, update, or manage todo items in an interactive widget. " +
+              "Items are persisted per-user across conversations when authenticated. " +
+              "Use action 'add' to add items, 'list' to show current items, " +
+              "'set' to replace the entire list (for completing/removing items), " +
+              "or 'clear' to remove all items.",
             inputSchema: TOOL_INPUT_SCHEMA,
             _meta: widgetMeta(),
             ...(AUTH_ENABLED ? { securitySchemes: SECURITY_SCHEMES } : {}),
@@ -174,26 +215,61 @@ function handleMethod(
       }
 
       const args = (params.arguments ?? {}) as {
+        action?: string;
         items?: Array<{ title: string; completed?: boolean }>;
       };
-      const items = (args.items ?? []).map((item) => ({
-        title: item.title,
-        completed: item.completed ?? false,
-      }));
-      const count = items.length;
+
+      const incomingItems = args.items ?? [];
+      const action =
+        args.action ?? (incomingItems.length > 0 ? "add" : "list");
+
+      const canPersist = STORAGE_ENABLED && userId;
+      let items: TodoItem[];
+      let message: string;
+
+      switch (action) {
+        case "clear": {
+          if (canPersist) await deleteTodos(userId);
+          items = [];
+          message = "Cleared your todo list.";
+          break;
+        }
+        case "set": {
+          items = incomingItems.map((item) => ({
+            id: uid(),
+            title: item.title,
+            completed: item.completed ?? false,
+          }));
+          if (canPersist) await saveTodos(userId, items);
+          message = `Updated your todo list (${items.length} item${items.length !== 1 ? "s" : ""}).`;
+          break;
+        }
+        case "list": {
+          items = canPersist ? await loadTodos(userId) : [];
+          message =
+            items.length > 0
+              ? `Here are your ${items.length} todo item${items.length !== 1 ? "s" : ""}.`
+              : "Your todo list is empty.";
+          break;
+        }
+        case "add":
+        default: {
+          const existing = canPersist ? await loadTodos(userId) : [];
+          items = mergeTodos(existing, incomingItems);
+          if (canPersist) await saveTodos(userId, items);
+          const added = items.length - existing.length;
+          message =
+            added > 0
+              ? `Added ${added} item${added !== 1 ? "s" : ""} to your todo list (${items.length} total).`
+              : `Updated your todo list (${items.length} item${items.length !== 1 ? "s" : ""}).`;
+          break;
+        }
+      }
 
       const sessionId = userId ? `todo-${userId}` : "todo-default";
 
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              count > 0
-                ? `Added ${count} item${count !== 1 ? "s" : ""} to your todo list.`
-                : "Here is your todo list.",
-          },
-        ],
+        content: [{ type: "text", text: message }],
         structuredContent: { items },
         _meta: widgetMeta(sessionId),
       };
@@ -232,12 +308,12 @@ function handleMethod(
   }
 }
 
-function processRequest(
+async function processRequest(
   req: JsonRpcRequest,
   userId: string | null
-): JsonRpcResponse | null {
+): Promise<JsonRpcResponse | null> {
   try {
-    const result = handleMethod(req.method, req.params, userId);
+    const result = await handleMethod(req.method, req.params, userId);
     if (result === null) return null; // notification
     return { jsonrpc: "2.0", id: req.id, result };
   } catch (err: unknown) {
@@ -268,7 +344,6 @@ export default async function handler(req: any, res: any) {
   }
 
   if (req.method === "GET") {
-    // Server-sent events endpoint (not needed for stateless mode)
     return res.status(405).json({ error: "SSE not supported; use POST" });
   }
 
@@ -281,13 +356,14 @@ export default async function handler(req: any, res: any) {
 
   // Batch request
   if (Array.isArray(body)) {
-    const responses = body
-      .map((item: JsonRpcRequest) => processRequest(item, userId))
-      .filter(Boolean);
+    const responses = (
+      await Promise.all(
+        body.map((item: JsonRpcRequest) => processRequest(item, userId))
+      )
+    ).filter(Boolean);
 
     if (responses.length === 0) return res.status(202).end();
 
-    // Include session ID header on initialize
     if (body.some((r: JsonRpcRequest) => r.method === "initialize")) {
       res.setHeader("mcp-session-id", "stateless");
     }
@@ -296,7 +372,7 @@ export default async function handler(req: any, res: any) {
   }
 
   // Single request
-  const response = processRequest(body, userId);
+  const response = await processRequest(body, userId);
   if (response === null) return res.status(202).end();
 
   if (body.method === "initialize") {

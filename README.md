@@ -106,6 +106,48 @@ ngrok http 5173
 
 Then add the ngrok URL (e.g. `https://abc123.ngrok-free.app/api/mcp`) as a connector in ChatGPT Settings > Connectors.
 
+## Persistent Storage with Upstash Redis (Optional)
+
+Persist todos across conversations using [Upstash Redis](https://upstash.com/) (free tier: 10,000 commands/day, 256MB). Requires OAuth to be configured so the server knows which user's todos to load.
+
+Without Upstash configured, todos persist within a conversation (via `widgetState`) but are lost when starting a new conversation.
+
+### 1. Create an Upstash account
+
+Go to [console.upstash.com](https://console.upstash.com/) and sign up (free, no credit card required).
+
+### 2. Create a Redis database
+
+1. From the Upstash Console, click **Create Database**
+2. Name: `chatgpt-todo-app` (or anything you like)
+3. Region: choose the region closest to your Vercel deployment (e.g. `us-east-1` for Vercel's default)
+4. Click **Create**
+
+### 3. Connect to your Vercel project
+
+**Option A — Via the Vercel Integration (recommended):**
+
+1. Go to [vercel.com/integrations/upstash](https://vercel.com/integrations/upstash)
+2. Click **Add Integration** and select your Vercel project
+3. In the Upstash integration dashboard, link your Redis database to your project
+4. Vercel automatically sets `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` as environment variables
+
+**Option B — Manual setup:**
+
+1. In the Upstash Console, open your database and go to the **REST API** section
+2. Copy `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`
+3. In your Vercel project, go to **Settings** → **Environment Variables** and add both values
+
+### 4. Redeploy
+
+```bash
+vercel --prod
+```
+
+### 5. Verify
+
+Start a new ChatGPT conversation, add some todos, then start another new conversation and ask "show me my todo list" — your items should still be there.
+
 ## OAuth Authentication (Optional)
 
 Add user authentication so each person gets their own todo list. Uses [Auth0](https://auth0.com/) (free tier, up to 25,000 MAU).
@@ -171,6 +213,7 @@ When OAuth is configured, ChatGPT will prompt users to sign in before using the 
 ```
 ├── api/
 │   ├── mcp.ts              # Vercel serverless function — MCP server
+│   ├── db.ts               # Upstash Redis wrapper for todo persistence
 │   └── oauth-metadata.ts   # OAuth protected resource metadata endpoint
 ├── src/
 │   ├── App.tsx              # Todo widget using @openai/apps-sdk-ui components
@@ -232,6 +275,10 @@ When OAuth is configured, ChatGPT will prompt users to sign in before using the 
 │  │ Build artifact: dist/index.html                                 │  │
 │  │ (React + Tailwind + apps-sdk-ui inlined into one HTML file)     │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
+│                                                                       │
+│  tools/call reads/writes ──► Upstash Redis (per-user persistence)    │
+│                               Key: "todos:{jwt.sub}"                  │
+│                               Value: TodoItem[]                       │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -307,9 +354,9 @@ Uses "todo-{userId}" as widgetSessionId for per-user state
 
 **`window.openai` bridge**: The host (ChatGPT) exposes a `window.openai` object inside the widget iframe. The widget reads `toolOutput` (structured data from the MCP tool call) and `widgetState` (persisted state from previous turns), and writes back via `setWidgetState()` and `callTool()`.
 
-**State persistence**: The server returns `openai/widgetSessionId` in tool response metadata. This links `widgetState` across conversation turns so todos persist even when ChatGPT calls the tool again. The widget merges new items from `toolOutput` with existing state from `widgetState`.
+**State persistence**: Two layers. Within a conversation, `widgetState` (linked via `openai/widgetSessionId`) preserves todos across tool calls. Across conversations, when both OAuth and Upstash Redis are configured, the server stores todos keyed by the user's OAuth ID (`todos:{jwt.sub}`). On each `tools/call`, the server loads from Redis, merges any new items, saves back, and returns the full list.
 
-**OAuth** (optional): When `AUTHORIZATION_SERVER_URL` and `RESOURCE_SERVER_URL` env vars are set, the server requires authentication. It advertises `securitySchemes` on the tool, returns `mcp/www_authenticate` errors to trigger ChatGPT's sign-in UI, and decodes the JWT to create per-user widget sessions.
+**OAuth** (optional): When `AUTHORIZATION_SERVER_URL` and `RESOURCE_SERVER_URL` env vars are set, the server requires authentication. It advertises `securitySchemes` on the tool, returns `mcp/www_authenticate` errors to trigger ChatGPT's sign-in UI, and decodes the JWT to identify the user. The JWT `sub` claim is used as the Redis key for per-user todo storage.
 
 ## Troubleshooting
 

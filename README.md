@@ -188,21 +188,128 @@ When OAuth is configured, ChatGPT will prompt users to sign in before using the 
 
 ## How It Works
 
+### Architecture
+
 ```
-User ─── ChatGPT ─── MCP (JSON-RPC over HTTP) ─── Vercel Serverless Function
-                              │
-                              ├── initialize       → server capabilities
-                              ├── tools/list       → manage-todos tool definition
-                              ├── tools/call       → structured content + widget URI
-                              ├── resources/list   → widget HTML resource listing
-                              └── resources/read   → self-contained widget HTML
+┌─────────────────────────────────────────────────────────────────────┐
+│                           ChatGPT                                   │
+│                                                                     │
+│  ┌──────────────┐     ┌──────────────────────────────────────────┐  │
+│  │              │     │          Conversation UI                  │  │
+│  │   LLM        │     │                                          │  │
+│  │              │     │  ┌────────────────────────────────────┐   │  │
+│  │  Decides to  │     │  │     Widget (sandboxed iframe)      │   │  │
+│  │  call tools  │     │  │                                    │   │  │
+│  │  based on    │     │  │  React app built with              │   │  │
+│  │  user input  │     │  │  @openai/apps-sdk-ui               │   │  │
+│  │              │     │  │                                    │   │  │
+│  │              │     │  │  Reads: toolOutput, widgetState    │   │  │
+│  │              │     │  │  Writes: setWidgetState, callTool  │   │  │
+│  │              │     │  │                                    │   │  │
+│  └──────┬───────┘     │  └──────────┬─────────────────────────┘   │  │
+│         │             │             │                              │  │
+│         │             └─────────────┼──────────────────────────────┘  │
+│         │                           │                                 │
+│         │  window.openai            │  window.openai                  │
+│         │  (host bridge)            │  (host bridge)                  │
+└─────────┼───────────────────────────┼─────────────────────────────────┘
+          │                           │
+          │ MCP (JSON-RPC 2.0        │ widgetState persisted
+          │ over HTTPS)              │ via widgetSessionId
+          │                           │
+          ▼                           │
+┌─────────────────────────────────────┼─────────────────────────────────┐
+│           Vercel Serverless Function (api/mcp.ts)                     │
+│                                                                       │
+│  Handles MCP methods:                                                 │
+│                                                                       │
+│  initialize ──────────► server capabilities + protocol version        │
+│  tools/list ──────────► manage-todos tool definition + widget URI     │
+│  tools/call ──────────► structured todo data + widget session ID      │
+│  resources/read ──────► self-contained widget HTML (single file)      │
+│                                                                       │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │ Build artifact: dist/index.html                                 │  │
+│  │ (React + Tailwind + apps-sdk-ui inlined into one HTML file)     │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────────────┘
 ```
+
+### Request flow
+
+```
+User: "Add buy groceries to my todo list"
+  │
+  ▼
+ChatGPT LLM interprets the message
+  │
+  ├──► MCP POST tools/call { name: "manage-todos", arguments: { items: [...] } }
+  │      │
+  │      ▼
+  │    Vercel function returns:
+  │      ├── content: [{ text: "Added 1 item to your todo list." }]
+  │      ├── structuredContent: { items: [{ title: "buy groceries", completed: false }] }
+  │      └── _meta: { "openai/outputTemplate": "ui://widget/todo.html",
+  │                    "openai/widgetSessionId": "todo-default" }
+  │
+  ├──► MCP POST resources/read { uri: "ui://widget/todo.html" }
+  │      │
+  │      ▼
+  │    Vercel function returns the self-contained widget HTML
+  │
+  ▼
+ChatGPT renders the widget in a sandboxed iframe
+  │
+  ▼
+Widget reads structuredContent via window.openai.toolOutput
+Widget displays the interactive todo list
+User can add/toggle/delete items directly in the widget
+Widget persists changes via window.openai.setWidgetState()
+```
+
+### OAuth flow (when configured)
+
+```
+User asks to use todos (first time)
+  │
+  ▼
+ChatGPT calls tools/call without a Bearer token
+  │
+  ▼
+Server returns error with _meta: { "mcp/www_authenticate": ["Bearer ..."] }
+  │
+  ▼
+ChatGPT fetches /.well-known/oauth-protected-resource/api/mcp
+  │    Returns: { authorization_servers: ["https://tenant.auth0.com"] }
+  │
+  ▼
+ChatGPT registers as OAuth client via Auth0 Dynamic Client Registration
+  │
+  ▼
+User is prompted to sign in (e.g. Google login via Auth0)
+  │
+  ▼
+ChatGPT receives access token (JWT)
+  │
+  ▼
+ChatGPT retries tools/call with Authorization: Bearer <token>
+  │
+  ▼
+Server decodes JWT, extracts user ID (sub claim)
+Uses "todo-{userId}" as widgetSessionId for per-user state
+```
+
+### Key concepts
 
 **MCP Server** (`api/mcp.ts`): Implements the [Model Context Protocol](https://modelcontextprotocol.io/) over stateless HTTP. Each POST request is an independent JSON-RPC 2.0 call — no session state is stored server-side.
 
-**Widget** (`src/App.tsx`): A React app using `@openai/apps-sdk-ui` components (Checkbox, Input, Button, SegmentedControl, Badge, EmptyMessage). Built into a single self-contained HTML file via `vite-plugin-singlefile`.
+**Widget** (`src/App.tsx`): A React app rendered in a sandboxed iframe inside the ChatGPT conversation. Built with `@openai/apps-sdk-ui` components (Checkbox, Input, Button, SegmentedControl, Badge, EmptyMessage) and compiled into a single self-contained HTML file via `vite-plugin-singlefile`.
+
+**`window.openai` bridge**: The host (ChatGPT) exposes a `window.openai` object inside the widget iframe. The widget reads `toolOutput` (structured data from the MCP tool call) and `widgetState` (persisted state from previous turns), and writes back via `setWidgetState()` and `callTool()`.
 
 **State persistence**: The server returns `openai/widgetSessionId` in tool response metadata. This links `widgetState` across conversation turns so todos persist even when ChatGPT calls the tool again. The widget merges new items from `toolOutput` with existing state from `widgetState`.
+
+**OAuth** (optional): When `AUTHORIZATION_SERVER_URL` and `RESOURCE_SERVER_URL` env vars are set, the server requires authentication. It advertises `securitySchemes` on the tool, returns `mcp/www_authenticate` errors to trigger ChatGPT's sign-in UI, and decodes the JWT to create per-user widget sessions.
 
 ## Troubleshooting
 

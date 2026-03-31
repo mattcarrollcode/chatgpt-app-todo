@@ -12,10 +12,22 @@ const WIDGET_HTML = readFileSync(
 const WIDGET_URI = "ui://widget/todo.html";
 const MIME_TYPE = "text/html+skybridge";
 
+const AUTH_SERVER_URL = process.env.AUTHORIZATION_SERVER_URL || "";
+const RESOURCE_SERVER_URL = process.env.RESOURCE_SERVER_URL || "";
+const AUTH_ENABLED = !!(AUTH_SERVER_URL && RESOURCE_SERVER_URL);
+
+let PROTECTED_RESOURCE_METADATA_URL = "";
+if (AUTH_ENABLED) {
+  const parsed = new URL(RESOURCE_SERVER_URL);
+  PROTECTED_RESOURCE_METADATA_URL = `${parsed.origin}/.well-known/oauth-protected-resource${parsed.pathname}`;
+}
+
 const SERVER_INFO = {
   name: "chatgpt-todo-app",
   version: "1.0.0",
 };
+
+const SECURITY_SCHEMES = [{ type: "oauth2", scopes: [] as string[] }];
 
 function widgetMeta(sessionId?: string) {
   const meta: Record<string, unknown> = {
@@ -24,6 +36,9 @@ function widgetMeta(sessionId?: string) {
     "openai/toolInvocation/invoked": "Todo list ready",
     "openai/widgetAccessible": true,
   };
+  if (AUTH_ENABLED) {
+    meta.securitySchemes = SECURITY_SCHEMES;
+  }
   if (sessionId) {
     meta["openai/widgetSessionId"] = sessionId;
   }
@@ -69,9 +84,53 @@ type JsonRpcResponse = {
   error?: { code: number; message: string };
 };
 
+function getBearerToken(req: any): string | null {
+  const auth = req.headers?.authorization;
+  if (!auth || typeof auth !== "string") return null;
+  if (!auth.toLowerCase().startsWith("bearer ")) return null;
+  return auth.slice(7).trim() || null;
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const payload = Buffer.from(parts[1], "base64url").toString("utf-8");
+    return JSON.parse(payload);
+  } catch {
+    return null;
+  }
+}
+
+function getUserId(req: any): string | null {
+  const token = getBearerToken(req);
+  if (!token) return null;
+  const payload = decodeJwtPayload(token);
+  if (!payload) return null;
+  return (payload.sub as string) || null;
+}
+
+function oauthErrorResult() {
+  return {
+    content: [
+      {
+        type: "text",
+        text: "Authentication required. Please sign in to use your todo list.",
+      },
+    ],
+    isError: true,
+    _meta: {
+      "mcp/www_authenticate": [
+        `Bearer error="invalid_request", error_description="No access token was provided", resource_metadata="${PROTECTED_RESOURCE_METADATA_URL}"`,
+      ],
+    },
+  };
+}
+
 function handleMethod(
   method: string,
-  params: Record<string, unknown> = {}
+  params: Record<string, unknown> = {},
+  userId: string | null = null
 ): unknown | null {
   switch (method) {
     case "initialize":
@@ -94,6 +153,7 @@ function handleMethod(
               "Add, display, or update todo items in an interactive widget. Pass items to add them to the list.",
             inputSchema: TOOL_INPUT_SCHEMA,
             _meta: widgetMeta(),
+            ...(AUTH_ENABLED ? { securitySchemes: SECURITY_SCHEMES } : {}),
             annotations: {
               destructiveHint: false,
               openWorldHint: false,
@@ -108,6 +168,11 @@ function handleMethod(
       if (toolName !== "manage-todos") {
         throw { code: -32602, message: `Unknown tool: ${toolName}` };
       }
+
+      if (AUTH_ENABLED && !userId) {
+        return oauthErrorResult();
+      }
+
       const args = (params.arguments ?? {}) as {
         items?: Array<{ title: string; completed?: boolean }>;
       };
@@ -116,6 +181,9 @@ function handleMethod(
         completed: item.completed ?? false,
       }));
       const count = items.length;
+
+      const sessionId = userId ? `todo-${userId}` : "todo-default";
+
       return {
         content: [
           {
@@ -127,7 +195,7 @@ function handleMethod(
           },
         ],
         structuredContent: { items },
-        _meta: widgetMeta("todo-default"),
+        _meta: widgetMeta(sessionId),
       };
     }
 
@@ -164,9 +232,12 @@ function handleMethod(
   }
 }
 
-function processRequest(req: JsonRpcRequest): JsonRpcResponse | null {
+function processRequest(
+  req: JsonRpcRequest,
+  userId: string | null
+): JsonRpcResponse | null {
   try {
-    const result = handleMethod(req.method, req.params);
+    const result = handleMethod(req.method, req.params, userId);
     if (result === null) return null; // notification
     return { jsonrpc: "2.0", id: req.id, result };
   } catch (err: unknown) {
@@ -184,7 +255,7 @@ export default async function handler(req: any, res: any) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "content-type, mcp-session-id"
+    "content-type, mcp-session-id, authorization"
   );
   res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
 
@@ -205,12 +276,13 @@ export default async function handler(req: any, res: any) {
     return res.status(405).end();
   }
 
+  const userId = AUTH_ENABLED ? getUserId(req) : null;
   const body = req.body;
 
   // Batch request
   if (Array.isArray(body)) {
     const responses = body
-      .map((item: JsonRpcRequest) => processRequest(item))
+      .map((item: JsonRpcRequest) => processRequest(item, userId))
       .filter(Boolean);
 
     if (responses.length === 0) return res.status(202).end();
@@ -224,7 +296,7 @@ export default async function handler(req: any, res: any) {
   }
 
   // Single request
-  const response = processRequest(body);
+  const response = processRequest(body, userId);
   if (response === null) return res.status(202).end();
 
   if (body.method === "initialize") {

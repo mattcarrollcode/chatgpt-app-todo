@@ -106,11 +106,72 @@ ngrok http 5173
 
 Then add the ngrok URL (e.g. `https://abc123.ngrok-free.app/api/mcp`) as a connector in ChatGPT Settings > Connectors.
 
+## OAuth Authentication (Optional)
+
+Add user authentication so each person gets their own todo list. Uses [Auth0](https://auth0.com/) (free tier, up to 25,000 MAU).
+
+Without OAuth configured, the app works for everyone without sign-in.
+
+### 1. Create an Auth0 Tenant
+
+Sign up at [auth0.com](https://auth0.com/) and create a new tenant.
+
+### 2. Create an API
+
+- Auth0 Dashboard → **Applications** → **APIs** → **Create API**
+- Name: `chatgpt-todo-app`
+- Identifier: `https://your-vercel-url.vercel.app/api/mcp`
+- Signing Algorithm: RS256
+
+### 3. Set Default Audience
+
+- **Settings** → **General** → **API Authorization Settings** → **Default Audience**
+- Set it to the API identifier from step 2
+
+This ensures Auth0 issues unencrypted RS256 JWTs.
+
+### 4. Enable Dynamic Client Registration
+
+- **Settings** → **Advanced** → enable **OIDC Dynamic Application Registration**
+
+ChatGPT uses this to automatically register as an OAuth client.
+
+### 5. Add a Login Method
+
+- **Authentication** → **Social** → enable **google-oauth2**
+- Click the connection → **Advanced** → **Promote Connection to Domain Level**
+
+### 6. Set Environment Variables
+
+In Vercel (Settings → Environment Variables), add:
+
+| Variable | Value |
+|---|---|
+| `AUTHORIZATION_SERVER_URL` | `https://YOUR-TENANT.auth0.com` |
+| `RESOURCE_SERVER_URL` | `https://your-vercel-url.vercel.app/api/mcp` |
+
+Then redeploy:
+
+```bash
+vercel --prod
+```
+
+### 7. Verify OAuth Metadata
+
+```bash
+curl https://your-vercel-url.vercel.app/.well-known/oauth-protected-resource/api/mcp
+```
+
+Should return JSON with `resource`, `authorization_servers`, and `scopes_supported`.
+
+When OAuth is configured, ChatGPT will prompt users to sign in before using the todo tool. Each user gets a unique session ID based on their identity.
+
 ## Project Structure
 
 ```
 ├── api/
-│   └── mcp.ts              # Vercel serverless function — MCP server
+│   ├── mcp.ts              # Vercel serverless function — MCP server
+│   └── oauth-metadata.ts   # OAuth protected resource metadata endpoint
 ├── src/
 │   ├── App.tsx              # Todo widget using @openai/apps-sdk-ui components
 │   ├── main.tsx             # Widget entry point
